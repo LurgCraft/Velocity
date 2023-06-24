@@ -23,6 +23,7 @@ import com.velocitypowered.proxy.VelocityServer;
 import com.velocitypowered.proxy.connection.MinecraftSessionHandler;
 import com.velocitypowered.proxy.connection.backend.BungeeCordMessageResponder;
 import com.velocitypowered.proxy.connection.backend.VelocityServerConnection;
+import com.velocitypowered.proxy.protocol.packet.LoginPluginResponse;
 import com.velocitypowered.proxy.protocol.packet.PluginMessage;
 import com.velocitypowered.proxy.protocol.util.PluginMessageUtil;
 import io.netty.buffer.ByteBufUtil;
@@ -34,17 +35,28 @@ import org.apache.logging.log4j.Logger;
  * Handles the play state between exiting the login phase and establishing the first connection
  * to a backend server.
  */
-public class InitialConnectSessionHandler implements MinecraftSessionHandler {
+public class ClientTransitionSessionHandler implements MinecraftSessionHandler {
 
-  private static final Logger logger = LogManager.getLogger(InitialConnectSessionHandler.class);
+  private static final Logger logger = LogManager.getLogger(ClientTransitionSessionHandler.class);
 
   private final ConnectedPlayer player;
-
   private final VelocityServer server;
 
-  InitialConnectSessionHandler(ConnectedPlayer player, VelocityServer server) {
+  public ClientTransitionSessionHandler(ConnectedPlayer player, VelocityServer server) {
     this.player = player;
     this.server = server;
+  }
+
+  @Override
+  public boolean handle(LoginPluginResponse packet) {
+    VelocityServerConnection serverConn = player.getConnectionInFlight();
+    if (serverConn != null) {
+      if (player.getPhase().handle(player, packet, serverConn)) {
+        return true;
+      }
+      serverConn.ensureConnected().write(packet.retain());
+    }
+    return true;
   }
 
   @Override
@@ -94,7 +106,6 @@ public class InitialConnectSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public void disconnected() {
-    // the user cancelled the login process
     player.teardown();
   }
 }

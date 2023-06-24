@@ -19,7 +19,8 @@ package com.velocitypowered.proxy.connection.backend;
 
 import com.velocitypowered.proxy.connection.client.ConnectedPlayer;
 import com.velocitypowered.proxy.connection.forge.legacy.LegacyForgeHandshakeBackendPhase;
-import com.velocitypowered.proxy.protocol.packet.PluginMessage;
+import com.velocitypowered.proxy.connection.forge.modern.ModernForgeHandshakeBackendPhase;
+import com.velocitypowered.proxy.protocol.packet.LoginPluginMessage;
 
 /**
  * Contains Vanilla {@link BackendConnectionPhase}s.
@@ -46,11 +47,11 @@ public final class BackendConnectionPhases {
 
     @Override
     public boolean handle(VelocityServerConnection serverConn,
-        ConnectedPlayer player,
-        PluginMessage message) {
-      // The connection may be legacy forge. If so, the Forge handler will deal with this
+                          ConnectedPlayer player,
+                          LoginPluginMessage message) {
+      // The connection may be modern forge. If so, the Forge handler will deal with this
       // for us. Otherwise, we have nothing to do.
-      return LegacyForgeHandshakeBackendPhase.NOT_STARTED.handle(serverConn, player, message);
+      return ModernForgeHandshakeBackendPhase.NOT_STARTED.handle(serverConn, player, message);
     }
   };
 

@@ -692,8 +692,15 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     handleKickEvent(originalEvent, friendlyReason, kickedFromCurrent);
   }
 
-  private void handleKickEvent(KickedFromServerEvent originalEvent, Component friendlyReason,
-      boolean kickedFromCurrent) {
+  /**
+   * Handles the player being kicked.
+   *
+   * @param originalEvent The original kick event
+   * @param friendlyReason The reason they were kicked as a component
+   * @param kickedFromCurrent If it should kick them from the current server
+   */
+  public void handleKickEvent(KickedFromServerEvent originalEvent, Component friendlyReason,
+                               boolean kickedFromCurrent) {
     server.getEventManager().fire(originalEvent)
         .thenAcceptAsync(event -> {
           // There can't be any connection in flight now.
@@ -842,7 +849,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     }
   }
 
-  public void sendLegacyForgeHandshakeResetPacket() {
+  public void sendForgeHandshakeResetPacket() {
     connectionPhase.resetConnectionPhase(this);
   }
 

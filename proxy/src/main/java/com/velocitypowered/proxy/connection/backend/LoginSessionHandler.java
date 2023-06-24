@@ -17,17 +17,23 @@
 
 package com.velocitypowered.proxy.connection.backend;
 
+import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.ServerLoginPluginMessageEvent;
 import com.velocitypowered.api.network.ProtocolVersion;
 import com.velocitypowered.api.proxy.crypto.IdentifiedKey;
 import com.velocitypowered.api.proxy.messages.MinecraftChannelIdentifier;
+import com.velocitypowered.api.proxy.server.RegisteredServer;
+import com.velocitypowered.api.util.UuidUtils;
 import com.velocitypowered.proxy.VelocityServer;
 import com.velocitypowered.proxy.config.PlayerInfoForwarding;
 import com.velocitypowered.proxy.config.VelocityConfiguration;
+import com.velocitypowered.proxy.connection.ConnectionTypes;
 import com.velocitypowered.proxy.connection.MinecraftConnection;
 import com.velocitypowered.proxy.connection.MinecraftSessionHandler;
 import com.velocitypowered.proxy.connection.VelocityConstants;
+import com.velocitypowered.proxy.connection.client.ClientTransitionSessionHandler;
 import com.velocitypowered.proxy.connection.client.ConnectedPlayer;
+import com.velocitypowered.proxy.connection.forge.modern.ModernForgeConstants;
 import com.velocitypowered.proxy.connection.util.ConnectionRequestResults;
 import com.velocitypowered.proxy.connection.util.ConnectionRequestResults.Impl;
 import com.velocitypowered.proxy.protocol.ProtocolUtils;
@@ -44,11 +50,14 @@ import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import javax.crypto.Mac;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -75,6 +84,45 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
   }
 
   @Override
+  public void activated() {
+    /*
+     * The following logic is used for handling the reset packet sent to the player when
+     * they transfer servers
+     * and are on a modern forge (1.13+) environment.
+     * During this time the client has to renegotiate the connection with the server as
+     * to ensure all the client side
+     * registries (blocks, items etc.) are reset and then re-sent by the server. This
+     * ensures that all the registries
+     * are correctly sync'd wit the server and as such all blocks placed, items used,
+     * (etc) will match the server
+     * (when not matching this typically results in cases such as someone attempting
+     * to place mod A's block A but the
+     * server thinking they attempted to place mod B's block B or something to
+     * this effect)
+     * If there is an error by the server during this period then it is unrecoverable
+     * and as such the user should be
+     * disconnected.
+     */
+    if (serverConn.getPlayer().getConnection().getType() == ConnectionTypes.MODERN_FORGE) {
+      VelocityServerConnection existingConnection = serverConn.getPlayer().getConnectedServer();
+      if (existingConnection != null && existingConnection != serverConn) {
+        existingConnection.getPhase().onDepartForNewServer(
+                existingConnection,
+                serverConn.getPlayer()
+        );
+
+        // Shut down the existing server connection.
+        serverConn.getPlayer().setConnectedServer(null);
+        existingConnection.disconnect();
+      }
+
+      serverConn.getPlayer().sendForgeHandshakeResetPacket();
+      serverConn.getPlayer().getConnection().setSessionHandler(
+          new ClientTransitionSessionHandler(serverConn.getPlayer(), server));
+    }
+  }
+
+  @Override
   public boolean handle(EncryptionRequest packet) {
     throw new IllegalStateException("Backend server is online-mode!");
   }
@@ -98,6 +146,10 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
       LoginPluginResponse response = new LoginPluginResponse(packet.getId(), true, forwardingData);
       mc.write(response);
       informationForwarded = true;
+    } else if (packet.getChannel().equals(ModernForgeConstants.LOGIN_WRAPPER_CHANNEL)) {
+      if (serverConn.getPhase().handle(serverConn, serverConn.getPlayer(), packet)) {
+        return true;
+      }
     } else {
       // Don't understand, fire event if we have subscribers
       if (!this.server.getEventManager().hasSubscribers(ServerLoginPluginMessageEvent.class)) {
@@ -124,8 +176,19 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(Disconnect packet) {
-    resultFuture.complete(ConnectionRequestResults.forDisconnect(packet, serverConn.getServer()));
-    serverConn.disconnect();
+    if (this.server != null) {
+      Component reason = GsonComponentSerializer.gson().deserialize(packet.getReason());
+      Optional<RegisteredServer> next = serverConn.getPlayer().getNextServerToTry();
+      KickedFromServerEvent.ServerKickResult result = next
+              .map(KickedFromServerEvent.RedirectPlayer::create)
+              .orElseGet(() -> KickedFromServerEvent.DisconnectPlayer.create(reason));
+
+      serverConn.getPlayer().handleKickEvent(new KickedFromServerEvent(serverConn.getPlayer(),
+                      serverConn.getServer(), reason, true, result), reason, true);
+    } else {
+      resultFuture.complete(ConnectionRequestResults.forDisconnect(packet, serverConn.getServer()));
+      serverConn.disconnect();
+    }
     return true;
   }
 
@@ -152,8 +215,31 @@ public class LoginSessionHandler implements MinecraftSessionHandler {
     MinecraftConnection smc = serverConn.ensureConnected();
     smc.setState(StateRegistry.PLAY);
 
+    ConnectedPlayer player = serverConn.getPlayer();
+    MinecraftConnection pmc = player.getConnection();
+
+    serverConn.getPhase().onLoginSuccess(serverConn, player);
+
+    if (pmc.getState() == StateRegistry.LOGIN) {
+      VelocityConfiguration configuration = server.getConfiguration();
+      UUID playerUniqueId = player.getUniqueId();
+      if (configuration.getPlayerInfoForwardingMode() == PlayerInfoForwarding.NONE) {
+        playerUniqueId = UuidUtils.generateOfflinePlayerUuid(player.getUsername());
+      }
+      ServerLoginSuccess success = new ServerLoginSuccess();
+      success.setUsername(player.getUsername());
+      success.setUuid(playerUniqueId);
+      pmc.write(success);
+
+      if (pmc == null) {
+        return true;
+      }
+
+      pmc.setState(StateRegistry.PLAY);
+    }
+
     // Switch to the transition handler.
-    smc.setSessionHandler(new TransitionSessionHandler(server, serverConn, resultFuture));
+    smc.setSessionHandler(new BackendTransitionSessionHandler(server, serverConn, resultFuture));
     return true;
   }
 
